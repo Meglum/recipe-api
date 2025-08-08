@@ -1,5 +1,8 @@
 flask
+gunicorn
 requests
 beautifulsoup4
 extruct
 w3lib
+html5lib
+lxml
