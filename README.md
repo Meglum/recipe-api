@@ -1,9 +1,11 @@
 # Recipe API
 
-A simple Flask API that extracts recipe data from URLs using schema.org Recipe markup when available, falling back to basic text parsing.
+A Flask API to extract recipe data from any webpage.
 
 ## Endpoints
-- `/parse?url=<recipe_url>`: Returns extracted recipe data in JSON format.
+- `/extract?url=RECIPE_URL` → Returns JSON with recipe name, ingredients, and instructions.
 
 ## Deployment
-This app is ready to be deployed to services like Render or Heroku.
+- Install dependencies: `pip install -r requirements.txt`
+- Run locally: `python app.py`
+- Deploy on Render/Railway with `web: gunicorn app:app`

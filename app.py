@@ -1,45 +1,56 @@
 from flask import Flask, request, jsonify
 import requests
-from bs4 import BeautifulSoup
 import extruct
 from w3lib.html import get_base_url
+from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 
-def extract_recipe(url):
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    r = requests.get(url, headers=headers)
-    r.raise_for_status()
-    base_url = get_base_url(r.text, r.url)
+def extract_recipe_data(url):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    response = requests.get(url, headers=headers, timeout=10)
+    html = response.text
+    base_url = get_base_url(response.url)
 
-    # Try to extract structured data first
-    data = extruct.extract(r.text, base_url=base_url, syntaxes=['json-ld'])
-    for item in data.get("json-ld", []):
-        if item.get('@type') == 'Recipe':
-            return item
+    # Try JSON-LD & microdata
+    metadata = extruct.extract(html, base_url=base_url, syntaxes=["json-ld", "microdata"], uniform=True)
+    for syntax in ["json-ld", "microdata"]:
+        for data in metadata.get(syntax, []):
+            if data.get("@type") in ["Recipe", ["Recipe"]]:
+                return {
+                    "name": data.get("name"),
+                    "ingredients": data.get("recipeIngredient"),
+                    "instructions": [step.get("text", step) for step in data.get("recipeInstructions", [])]
+                }
 
-    # Fallback to text parsing
-    soup = BeautifulSoup(r.text, 'html.parser')
-    recipe = {
-        "name": soup.find('h1').get_text(strip=True) if soup.find('h1') else None,
-        "ingredients": [li.get_text(strip=True) for li in soup.select('li') if 'ingredient' in li.get_text().lower()],
-        "instructions": [p.get_text(strip=True) for p in soup.find_all('p')]
-    }
-    return recipe
+    # Fallback: HTML parsing
+    soup = BeautifulSoup(html, "html.parser")
+    ingredients = [li.get_text(strip=True) for li in soup.select("li") if "ingredient" in li.get("class", [])]
+    instructions = [p.get_text(strip=True) for p in soup.select("p") if "step" in p.get("class", [])]
 
-@app.route('/parse', methods=['GET'])
-def parse():
-    url = request.args.get('url')
+    if ingredients or instructions:
+        return {
+            "name": soup.title.string if soup.title else "Recipe",
+            "ingredients": ingredients,
+            "instructions": instructions
+        }
+
+    return None
+
+@app.route("/extract", methods=["GET"])
+def extract():
+    url = request.args.get("url")
     if not url:
-        return jsonify({"error": "URL is required"}), 400
+        return jsonify({"error": "Missing URL"}), 400
 
     try:
-        recipe = extract_recipe(url)
-        if not recipe:
-            return jsonify({"error": "Recipe not found"}), 404
-        return jsonify(recipe)
+        recipe = extract_recipe_data(url)
+        if recipe:
+            return jsonify(recipe)
+        else:
+            return jsonify({"error": "Failed to decode recipe"}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
