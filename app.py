@@ -5,12 +5,31 @@ from bs4 import BeautifulSoup
 import extruct
 from w3lib.html import get_base_url
 
+# Optional Cloudflare/Akamai bypass
+try:
+    import cloudscraper  # pip install cloudscraper
+except Exception:
+    cloudscraper = None
+
 app = Flask(__name__)
 
+# Keep your original UA, but use a fuller header set for tougher sites
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/123.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Connection": "keep-alive",
+}
 
 # -------------------------------
-# Helpers
+# Helpers (UNCHANGED from your file)
 # -------------------------------
 def _clean(s):
     if not s:
@@ -21,7 +40,7 @@ def _as_list(x):
     if x is None:
         return []
     if isinstance(x, list):
-        return [ _clean(i) for i in x if _clean(i) ]
+        return [_clean(i) for i in x if _clean(i)]
     return [_clean(x)]
 
 def _flatten_instructions(instr):
@@ -116,7 +135,7 @@ def _find_recipe_nodes(extruct_data):
     return candidates
 
 # -------------------------------
-# Extract via schema.org first
+# Extract via schema.org first (UNCHANGED)
 # -------------------------------
 def extract_schema_recipe(html, url):
     base_url = get_base_url(html, url)
@@ -147,7 +166,7 @@ def extract_schema_recipe(html, url):
     }
 
 # -------------------------------
-# HTML fallback if schema.org missing
+# HTML fallback if schema.org missing (UNCHANGED)
 # -------------------------------
 INGR_HEADINGS = re.compile(r"\b(ingredients|ingredient list|you(?:’|'|)ll need|what you'll need|shopping list)\b", re.I)
 STEP_HEADINGS = re.compile(r"\b(method|steps?|instructions?|preparation|directions?|how to(?: make)?)\b", re.I)
@@ -155,7 +174,7 @@ STEP_HEADINGS = re.compile(r"\b(method|steps?|instructions?|preparation|directio
 def _next_list_items(node):
     # Find the next ul/ol after a heading-like node
     for sib in node.find_all_next(["ul","ol"], limit=2):
-        items = [ _clean(li.get_text(" ", strip=True)) for li in sib.find_all("li") ]
+        items = [_clean(li.get_text(" ", strip=True)) for li in sib.find_all("li")]
         items = [i for i in items if i]
         if items:
             return items
@@ -182,11 +201,11 @@ def extract_html_fallback(html):
     # If empty, try common class names
     if not ingredients:
         guess_lists = soup.select("[class*=ingredient] li, .ingredients li, .recipe-ingredients li")
-        ingredients = [ _clean(li.get_text(" ", strip=True)) for li in guess_lists if _clean(li.get_text(" ", strip=True)) ]
+        ingredients = [_clean(li.get_text(" ", strip=True)) for li in guess_lists if _clean(li.get_text(" ", strip=True))]
     # As an absolute last resort, take first short-ish UL
     if not ingredients:
         for ul in soup.find_all("ul"):
-            items = [ _clean(li.get_text(' ', strip=True)) for li in ul.find_all("li") ]
+            items = [_clean(li.get_text(' ', strip=True)) for li in ul.find_all("li")]
             items = [i for i in items if 2 <= len(i.split()) <= 25]
             if 4 <= len(items) <= 40:  # heuristics
                 ingredients = items
@@ -198,7 +217,7 @@ def extract_html_fallback(html):
     if sh and hasattr(sh, "parent"):
         # prefer ordered list after heading
         for sib in sh.parent.find_all_next(["ol","ul"], limit=2):
-            items = [ _clean(li.get_text(" ", strip=True)) for li in sib.find_all("li") ]
+            items = [_clean(li.get_text(" ", strip=True)) for li in sib.find_all("li")]
             items = [i for i in items if i]
             if items:
                 steps = items
@@ -207,7 +226,7 @@ def extract_html_fallback(html):
     # If still nothing, try common class names
     if not steps:
         guess_steps = soup.select("[class*=method] li, .method__item, .instructions li, .direction li, .directions li")
-        steps = [ _clean(el.get_text(' ', strip=True)) for el in guess_steps if _clean(el.get_text(' ', strip=True)) ]
+        steps = [_clean(el.get_text(' ', strip=True)) for el in guess_steps if _clean(el.get_text(' ', strip=True))]
 
     # Finally, numbered paragraphs
     if not steps:
@@ -220,7 +239,65 @@ def extract_html_fallback(html):
     }
 
 # -------------------------------
-# HTTP endpoint
+# Anti-bot aware fetcher (ADDED)
+# -------------------------------
+def fetch_html(url: str):
+    """
+    Returns (html, final_url). Tries:
+      1) requests with realistic headers
+      2) cloudscraper (if installed)
+      3) ScraperAPI (if SCRAPER_API_KEY env set)
+    Raises Exception if all fail.
+    """
+    # 1) requests
+    try:
+        r = requests.get(url, headers=DEFAULT_HEADERS, timeout=25, allow_redirects=True)
+        if r.status_code < 400 and r.text:
+            return r.text, r.url
+        # fall through on common bot codes
+        if r.status_code not in (403, 429, 503):
+            body = (r.text or "")[:300]
+            raise Exception(f"HTTP {r.status_code}. Snippet: {body}")
+    except requests.RequestException as e:
+        last_err = f"requests error: {e}"
+
+    # 2) cloudscraper
+    if cloudscraper is not None:
+        try:
+            scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
+            r = scraper.get(url, headers=DEFAULT_HEADERS, timeout=35, allow_redirects=True)
+            if r.status_code < 400 and r.text:
+                return r.text, r.url
+            if r.status_code not in (403, 429, 503):
+                body = (r.text or "")[:300]
+                last_err = f"cloudscraper HTTP {r.status_code}. Snippet: {body}"
+        except Exception as e:
+            last_err = f"cloudscraper error: {e}"
+
+    # 3) ScraperAPI (optional)
+    key = os.environ.get("SCRAPER_API_KEY")
+    if key:
+        try:
+            proxy_url = "https://api.scraperapi.com"
+            params = {
+                "api_key": key,
+                "url": url,
+                "keep_headers": "true",
+                # AU region can help for Australian sites like taste.com.au
+                "country_code": os.environ.get("SCRAPER_COUNTRY", "au"),
+            }
+            r = requests.get(proxy_url, params=params, headers=DEFAULT_HEADERS, timeout=60)
+            if r.status_code < 400 and r.text:
+                return r.text, url
+            body = (r.text or "")[:300]
+            last_err = f"ScraperAPI HTTP {r.status_code}. Snippet: {body}"
+        except Exception as e:
+            last_err = f"scraperapi error: {e}"
+
+    raise Exception(f"Fetch failed for url: {url}. {last_err if 'last_err' in locals() else ''}")
+
+# -------------------------------
+# HTTP endpoint (uses fetch_html)
 # -------------------------------
 @app.route("/extract", methods=["GET"])
 def extract():
@@ -229,22 +306,21 @@ def extract():
         return jsonify({"error": "Missing url parameter"}), 400
 
     try:
-        resp = requests.get(url, headers=UA, timeout=15)
-        resp.raise_for_status()
+        html, final_url = fetch_html(url)
     except Exception as e:
         return jsonify({"error": f"Fetch failed: {e}"}), 502
 
-    # Try schema.org first
+    # Try schema.org first (UNCHANGED)
     try:
-        data = extract_schema_recipe(resp.text, resp.url)
+        data = extract_schema_recipe(html, final_url)
     except Exception:
         data = None
 
-    # Fallback to HTML heuristics
+    # Fallback to HTML heuristics (UNCHANGED)
     if not data or (not data["ingredients"] and not data["steps"]):
-        data = extract_html_fallback(resp.text)
+        data = extract_html_fallback(html)
 
-    # Guarantee the shape your iOS app expects:
+    # Guarantee the shape your iOS app expects (UNCHANGED)
     safe = {
         "title": data.get("title", "") or "",
         "ingredients": data.get("ingredients") or [],
@@ -257,6 +333,5 @@ def health():
     return {"ok": True}
 
 if __name__ == "__main__":
-    import os
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
