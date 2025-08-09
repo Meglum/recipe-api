@@ -1,6 +1,7 @@
 flask
 requests
+beautifulsoup4
 extruct
 w3lib
-beautifulsoup4
+lxml
 gunicorn
