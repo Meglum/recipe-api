@@ -254,7 +254,7 @@ def extract():
 
 @app.route("/health")
 def health():
-    return jsonify({"ok": True})
+    return {"ok": True}
 
 if __name__ == "__main__":
     import os
